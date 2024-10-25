@@ -44,7 +44,7 @@ int16_t usr2[CHUNK_SIZE];
 int16_t usr3[CHUNK_SIZE];
 int16_t usr4[CHUNK_SIZE];
 
-#define MAX_VALUE 32766
+#define MAX_VALUE 32767
 #define MIN_VALUE -32767
 
 void generate_sine(int16_t *table, int size) {
@@ -228,7 +228,6 @@ int running = 1;
 double of[VOICES];
 double on[VOICES];
 double oa[VOICES];
-int oe[VOICES];
 int ow[VOICES];
 
 // LFO-ey stuff
@@ -349,13 +348,12 @@ void dump(int16_t *wave) {
     close(fd);
 }
 
-
-
+/////
 
 #include <stdint.h>
 #include <stddef.h>
 
-// #define SAMPLE_RATE 44100
+#define SAMPLE_RATE 44100
 #define FIXED_POINT_SHIFT 16
 
 typedef struct {
@@ -399,11 +397,7 @@ int16_t next_wave_table_sample(WaveTableOscillator *osc) {
     int16_t current_sample = osc->wave_table[index];
     int16_t next_sample = osc->wave_table[next_index];
 
-#if 0
     int32_t interpolated_sample = current_sample + ((next_sample - current_sample) * fractional) / (1 << FIXED_POINT_SHIFT);
-#else
-    int32_t interpolated_sample = next_sample;
-#endif
 
     // Increment the phase accumulator by the phase increment
     osc->phase_accumulator += osc->phase_increment;
@@ -412,224 +406,420 @@ int16_t next_wave_table_sample(WaveTableOscillator *osc) {
     osc->phase_accumulator %= (osc->table_size << FIXED_POINT_SHIFT);
 
     return (int16_t)interpolated_sample;
-}
 
-
-WaveTableOscillator wtosc[VOICES];
-
-
-/// latest envelope experiment
-
-
-#include <stdint.h>
-
-int32_t calculate_units_per_sample(int32_t target_value, int32_t num_samples) {
-    // Shift the target value to be in Q24.8 format (left shift by 8 bits)
-    if (num_samples == 0) return 0; // avoid divby0
-    int32_t target_value_fixed = target_value << 8;
-
-    // Perform the division to get the step per sample in Q24.8 format
-    int32_t step_per_sample = target_value_fixed / num_samples;
-
-    return step_per_sample;
-}
-
-#define s32 int32_t
-#define s16 int16_t
-
-enum {
-    JENV_IDLE,
-    JENV_ATTACK,
-    JENV_DECAY,
-    JENV_SUSTAIN,
-    JENV_RELEASE
-};
-
-typedef struct {
-    s32 attack_ms;
-    s32 attack_level;
-    s32 attack_samples;
-    s32 attack_delta;
-    s32 current_step;
-    s32 current_level;
-    s32 current_stage;
-    s32 current_delta;
-} jenv_t;
-
-jenv_t jenv[VOICES];
-
-void joe_env_init(jenv_t *e, s32 attack_ms, s32 attack_level) {
-    e->attack_ms = attack_ms;
-    e->attack_level = attack_level;
-    e->attack_samples = attack_ms * SAMPLE_RATE / SAMPLE_RATE;
-    e->attack_delta = calculate_units_per_sample(attack_level, e->attack_samples);
-    printf("attack_ms:%d attack_level:%d attack_samples:%d attack_delta:%d\n",
-        e->attack_ms, e->attack_level,
-        e->attack_samples, e->attack_delta);
-    e->current_level = 0;
-    e->current_step = 0;
-    e->current_stage = JENV_IDLE;
-}
-
-void joe_env_trigger(jenv_t *e) {
-    e->current_stage = JENV_ATTACK;
-    e->current_level = 0; // ???
-    e->current_delta = e->attack_delta;
-    printf("trigger level:%d delta:%d\n", e->current_level, e->current_delta);
-}
-
-s16 joe_env_next(jenv_t *e) {
-    if (e->current_stage == JENV_ATTACK) {
-        if (e->current_level < e->attack_level) {
-            e->current_level += e->current_delta;
-        } else {
-            e->current_stage = JENV_DECAY;
-        }
-    }
-    return (int16_t)((e->current_level * 32767) >> 8);
-}
-
-///
-
-///// working but wonky envelope stuff below
-
-// simple ADSR
-
-#include <stdint.h>
-#include <stdbool.h>
-
-// Fixed point configuration
-#define FP_BITS 15
-#define FP_SCALE (1 << FP_BITS)
-#define FP_MAX INT32_MAX
-
-typedef enum {
-    ENV_IDLE,
-    ENV_ATTACK,
-    ENV_DECAY,
-    ENV_SUSTAIN,
-    ENV_RELEASE
-} EnvelopeStage;
-
-typedef struct {
-    // Configuration (all in fixed point)
-    int32_t attack_rate;   
-    int32_t decay_rate;    
-    int32_t release_rate;  
-    int32_t attack_level;  
-    int32_t sustain_level;
-    
-    // keep for display
-    int attack_ms;
-    int decay_ms;
-    int release_ms;
-
-    // State
-    EnvelopeStage stage;
-    int32_t current_level;
-    bool note_on;
-} Envelope;
-
-void envelope_init(Envelope* env, 
-                  uint32_t attack_ms,
-                  uint32_t decay_ms,
-                  uint32_t release_ms,
-                  uint32_t sample_rate) {
-    env->attack_ms = attack_ms;
-    env->decay_ms = decay_ms;
-    env->release_ms = release_ms;
-    // Set target levels in fixed point
-    env->attack_level = FP_SCALE;  // 1.0 in fixed point
-    env->sustain_level = (FP_SCALE * 7) / 10;  // 0.7 in fixed point
-    
-    // Calculate number of samples for each phase
-    uint32_t attack_samples = (attack_ms * sample_rate) / 1000;
-    uint32_t decay_samples = (decay_ms * sample_rate) / 1000;
-    uint32_t release_samples = (release_ms * sample_rate) / 1000;
-    
-    // Calculate rates ensuring we don't get zero due to fixed point math
-    // Rate = target_change_in_level / num_samples
-    env->attack_rate = env->attack_level / attack_samples;
-    if (env->attack_rate == 0) env->attack_rate = 1;  // Ensure minimum rate
-    
-    env->decay_rate = (env->attack_level - env->sustain_level) / decay_samples;
-    if (env->decay_rate == 0) env->decay_rate = 1;
-    
-    env->release_rate = env->sustain_level / release_samples;
-    if (env->release_rate == 0) env->release_rate = 1;
-    
-    env->stage = ENV_IDLE;
-    env->current_level = 0;
-    env->note_on = false;
-}
-
-void envelope_note_on(Envelope* env) {
-    env->note_on = true;
-    env->stage = ENV_ATTACK;
-}
-
-void envelope_note_off(Envelope* env) {
-    env->note_on = false;
-    env->stage = ENV_RELEASE;
-}
-
-int16_t envelope_process(Envelope* env) {
-    switch (env->stage) {
-        case ENV_IDLE:
-            env->current_level = 0;
-            break;
-            
-        case ENV_ATTACK:
-            env->current_level += env->attack_rate;
-            if (env->current_level >= env->attack_level) {
-                env->current_level = env->attack_level;
-                env->stage = ENV_DECAY;
-            }
-            break;
-            
-        case ENV_DECAY:
-            env->current_level -= env->decay_rate;
-            if (env->current_level <= env->sustain_level) {
-                env->current_level = env->sustain_level;
-                env->stage = ENV_SUSTAIN;
-            }
-            break;
-            
-        case ENV_SUSTAIN:
-            if (!env->note_on) {
-                env->stage = ENV_RELEASE;
-            }
-            break;
-            
-        case ENV_RELEASE:
-            env->current_level -= env->release_rate;
-            if (env->current_level <= 0) {
-                env->current_level = 0;
-                env->stage = ENV_IDLE;
-            }
-            break;
-    }
-    
-    // Convert to 16-bit signed integer range
-    return (int16_t)((env->current_level * 32767) >> FP_BITS);
+    return current_sample;
 }
 
 
 ////
+#if 1
 
-Envelope env[VOICES];
+
+
+
+// ----------------------
+
+
+#include <stdio.h>
+#include <stdint.h>
+
+typedef enum {
+    ATTACK,
+    DECAY,
+    SUSTAIN,
+    RELEASE,
+    IDLE
+} ADSRState;
+
+typedef struct {
+    ADSRState state;
+    uint32_t attackTime;    // Attack time in samples
+    uint32_t decayTime;     // Decay time in samples
+    int32_t sustainLevel;   // Sustain level (signed, can go below 0)
+    uint32_t releaseTime;   // Release time in samples
+    int32_t envelope;       // Current envelope value (signed, can go below 0)
+    int32_t attackRate;     // Rate of change per sample during attack
+    int32_t decayRate;      // Rate of change per sample during decay
+    int32_t releaseRate;    // Rate of change per sample during release
+} ADSR;
+
+#define MAX_ENVELOPE 2147483647  // 32-bit signed max value
+#define MIN_ENVELOPE -2147483647 // 32-bit signed min value
+
+void ADSR_init(ADSR* env, uint32_t attackTime, uint32_t decayTime, int32_t sustainLevel, uint32_t releaseTime, uint32_t sampleRate) {
+    env->state = IDLE;
+    env->attackTime = attackTime * sampleRate;
+    env->decayTime = decayTime * sampleRate;
+    env->sustainLevel = sustainLevel;
+    env->releaseTime = releaseTime * sampleRate;
+    env->envelope = 0;
+
+    // Calculate the rates (scaled by MAX_ENVELOPE)
+    env->attackRate = MAX_ENVELOPE / env->attackTime;
+    env->decayRate = (MAX_ENVELOPE - sustainLevel) / env->decayTime;
+    env->releaseRate = sustainLevel / env->releaseTime;
+}
+
+void ADSR_noteOn(ADSR* env) {
+    env->state = ATTACK;
+}
+
+void ADSR_noteOff(ADSR* env) {
+    env->state = RELEASE;
+}
+
+int32_t ADSR_process(ADSR* env) {
+    switch (env->state) {
+        case ATTACK:
+            env->envelope += env->attackRate;
+            if (env->envelope >= MAX_ENVELOPE) {
+                env->envelope = MAX_ENVELOPE;
+                env->state = DECAY;
+            }
+            break;
+        case DECAY:
+            if (env->envelope > env->sustainLevel) {
+                env->envelope -= env->decayRate;
+                if (env->envelope <= env->sustainLevel) {
+                    env->envelope = env->sustainLevel;
+                    env->state = SUSTAIN;
+                }
+            }
+            break;
+        case SUSTAIN:
+            // Stay at sustain level
+            env->envelope = env->sustainLevel;
+            break;
+        case RELEASE:
+            if (env->envelope > MIN_ENVELOPE) {
+                env->envelope -= env->releaseRate;
+                if (env->envelope <= MIN_ENVELOPE) {
+                    env->envelope = MIN_ENVELOPE;
+                    env->state = IDLE;
+                }
+            }
+            break;
+        case IDLE:
+            // Do nothing, envelope is at minimum
+            break;
+    }
+    return env->envelope;
+}
+
+// int main() {
+//     // Initialize an ADSR envelope with 44100 samples per second, integer values for times in seconds
+//     ADSR adsr;
+//     ADSR_init(&adsr, 2, 3, MAX_ENVELOPE * 0.7, 4, 44100);  // 2s attack, 3s decay, 70% sustain, 4s release
+
+//     // Trigger note on
+//     ADSR_noteOn(&adsr);
+
+//     // Simulate processing 100 samples
+//     for (int i = 0; i < 100; i++) {
+//         uint32_t envValue = ADSR_process(&adsr);
+//         printf("Sample %d: %u\n", i, envValue);
+//     }
+
+//     // Trigger note off after some time
+//     ADSR_noteOff(&adsr);
+
+//     // Simulate more samples
+//     for (int i = 0; i < 100; i++) {
+//         uint32_t envValue = ADSR_process(&adsr);
+//         printf("Sample %d: %u\n", i + 100, envValue);
+//     }
+
+//     return 0;
+// }
+
+
+ADSR env;
+
+
+// ----------------------
+
+////
+
+#else
+
+/////
+#if 1
+
+#include <stdint.h>
+#include <stdbool.h>
 
 #define SAMPLE_RATE 44100
 
-void show_voice(char flag, int i) {
-    printf("%c v%d w%d f%g e%d a%g t%d b%d ",
-        flag, i, ow[i], of[i], oe[i], oa[i], top[i], bot[i]);
-    printf("B%d,%d,%d\n",
-        env[i].attack_ms,
-        env[i].decay_ms,
-        env[i].release_ms
-        );
+typedef struct {
+    int16_t levels[8];      // 16-bit signed levels for each stage (-32768 to 32767)
+    uint32_t rates[8];      // 32-bit rate values for each stage (affects speed of transition)
+    int sustain_stage;      // Which stage is the sustain (0-7, -1 if none)
+    int release_stage;      // Which stage is the release (0-7)
+    int current_stage;      // Current stage in the envelope
+    int last_stage;
+    uint32_t step_count;    // Current step within the stage
+    int32_t current_level;  // Current level of the envelope (int32_t for intermediate calculation)
+    bool released;          // Has the release been triggered
+    bool triggered;         // Has the envelope been triggered
+    bool gate;
+    int32_t delta;          // The amount the level should change per sample
+} Envelope;
+
+// Initialize the envelope with levels and rates
+void init_envelope(Envelope *env, int16_t *levels, uint32_t *rates, int sustain_stage, int release_stage) {
+    for (int i = 0; i < 8; i++) {
+        env->levels[i] = levels[i];
+        env->rates[i] = rates[i];  // Now using 32-bit rates for longer transitions
+    }
+    env->sustain_stage = sustain_stage;
+    env->release_stage = release_stage;
+    env->current_stage = 0;
+    env->step_count = 0;
+    env->current_level = levels[0];  // Start at the level of stage 0
+    env->released = false;
+    env->triggered = false;
+    env->delta = 0;  // No change until triggered
 }
+
+// Trigger the envelope (starts the attack phase)
+void trigger_envelope(Envelope *env) {
+    env->last_stage = -1;
+    env->current_stage = 0;
+    env->step_count = 0;
+    env->current_level = env->levels[0];
+    env->released = false;
+    env->triggered = true;
+    env->gate = true;
+
+    // Calculate the change per sample for the first stage
+    if (env->rates[0] != 0) {
+        env->delta = (env->levels[1] - env->levels[0]) / (int32_t)env->rates[0];
+    }
+}
+
+// Trigger the release phase of the envelope
+void release_envelope(Envelope *env) {
+    env->released = true;
+
+    // Transition to the release stage if it's valid
+    if (env->release_stage >= 0 && env->release_stage < 8) {
+        env->current_stage = env->release_stage;
+        env->step_count = 0;
+
+        // Calculate the change per sample for the release stage
+        if (env->rates[env->release_stage] != 0) {
+            env->delta = (env->levels[env->release_stage + 1] - env->levels[env->release_stage]) / (int32_t)env->rates[env->release_stage];
+        } else {
+            env->delta = 0;  // No change if rate is zero
+        }
+    }
+}
+
+#define STAGE_MAX (8)
+
+// Get the next value in the envelope
+int16_t next_envelope_value(Envelope *env) {
+    // Return 0 if the envelope hasn't been triggered
+    if (!env->triggered) {
+        return 0;
+    }
+
+    if (env->current_stage != env->last_stage) {
+        printf("%d -> %d\r\n", env->last_stage, env->current_stage);
+        env->last_stage = env->current_stage;
+    }
+    // Advance the envelope by one step (1/44100 second)
+    env->current_level += env->delta;
+    env->step_count++;
+
+    // Check if the current stage is complete
+    if (env->step_count >= env->rates[env->current_stage]) {
+        env->current_stage++;
+        if (env->current_stage >= STAGE_MAX) env->current_stage = STAGE_MAX-1;
+        env->step_count = 0;
+
+        // If we're done with all stages, return the final level
+        if (env->current_stage >= STAGE_MAX) {
+            return env->levels[STAGE_MAX-1];
+        }
+
+        int32_t rate = (int32_t)env->rates[env->current_stage];
+
+        // If we're at the sustain stage, hold at that level
+        if (!env->released && env->current_stage == env->sustain_stage) {
+            env->delta = 0; // Hold at sustain level
+            return (int16_t)env->current_level; // Return current sustain level
+        } else if (env->released && env->current_stage == env->release_stage) {
+            // Calculate delta for the release stage
+            if (env->current_stage + 1 < STAGE_MAX) {
+                if (rate == 0) env->delta = 0;
+                else env->delta = (env->levels[env->current_stage + 1] - env->levels[env->current_stage]) / rate;
+            } else {
+                env->delta = 0; // End of envelope, stop changes
+            }
+        } else {
+            // Update delta for the next stage if we are not in the sustain stage
+            if (env->current_stage < (STAGE_MAX-1)) {
+                if (rate == 0) env->delta = 0;
+                else env->delta = (env->levels[env->current_stage + 1] - env->levels[env->current_stage]) / rate;
+            }
+        }
+    }
+
+    return (int16_t)env->current_level;
+}
+
+
+#else
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#define SAMPLE_RATE 44100
+
+typedef struct {
+    int16_t levels[8];      // 16-bit signed levels for each stage (-32768 to 32767)
+    uint32_t rates[8];      // 32-bit rate values for each stage (affects speed of transition)
+    int sustain_stage;      // Which stage is the sustain (0-7, -1 if none)
+    int release_stage;      // Which stage is the release (0-7)
+    int current_stage;      // Current stage in the envelope
+    uint32_t step_count;    // Current step within the stage
+    int32_t current_level;  // Current level of the envelope (int32_t for intermediate calculation)
+    bool released;          // Has the release been triggered
+    bool triggered;         // Has the envelope been triggered
+    int32_t delta;          // The amount the level should change per sample
+} Envelope;
+
+// Initialize the envelope with levels and rates
+void init_envelope(Envelope *env, int16_t *levels, uint32_t *rates, int sustain_stage, int release_stage) {
+    for (int i = 0; i < 8; i++) {
+        env->levels[i] = levels[i];
+        env->rates[i] = rates[i];  // Now using 32-bit rates for longer transitions
+    }
+    env->sustain_stage = sustain_stage;
+    env->release_stage = release_stage;
+    env->current_stage = 0;
+    env->step_count = 0;
+    env->current_level = levels[0];  // Start at the level of stage 0
+    env->released = false;
+    env->triggered = false;
+    env->delta = 0;  // No change until triggered
+}
+
+// Trigger the envelope (starts the attack phase)
+void trigger_envelope(Envelope *env) {
+    env->current_stage = 0;
+    env->step_count = 0;
+    env->current_level = env->levels[0];
+    env->released = false;
+    env->triggered = true;
+
+    // Calculate the change per sample for the first stage
+    if (env->rates[0] != 0) {
+        env->delta = (env->levels[1] - env->levels[0]) / (int32_t)env->rates[0];
+    }
+}
+
+// Trigger the release phase of the envelope
+void release_envelope(Envelope *env) {
+    env->released = true;
+    if (env->release_stage >= 0 && env->release_stage < 8) {
+        env->current_stage = env->release_stage;
+        env->step_count = 0;
+
+        // Calculate the change per sample for the release stage
+        if (env->rates[env->release_stage] != 0) {
+            env->delta = (env->levels[env->release_stage + 1] - env->levels[env->release_stage]) / (int32_t)env->rates[env->release_stage];
+        }
+    }
+}
+
+// Get the next value in the envelope
+int16_t next_envelope_value(Envelope *env) {
+    // Return 0 if the envelope hasn't been triggered
+    if (!env->triggered) {
+        return 0;
+    }
+
+    // Ensure we're within a valid stage
+    if (env->current_stage >= 8) {
+        return (int16_t)env->current_level;
+    }
+
+    // Advance the envelope by one step (1/44100 second)
+    env->current_level += env->delta;
+    env->step_count++;
+
+    // Check if the current stage is complete
+    if (env->step_count >= env->rates[env->current_stage]) {
+        env->current_stage++;
+        env->step_count = 0;
+
+        // If we're done with all stages, return the final level
+        if (env->current_stage >= 8) {
+            puts("R");
+            return env->levels[7];
+        }
+
+        // Update delta for the next stage if we are not at the sustain stage
+        if (!env->released && env->current_stage == env->sustain_stage) {
+            return (int16_t)env->current_level; // Hold at sustain level
+        } else if (env->current_stage < 7) {
+            // Calculate delta for the next stage
+            if (env->rates[env->current_stage] == 0) return 0;
+            env->delta = (env->levels[env->current_stage + 1] - env->levels[env->current_stage]) / (int32_t)env->rates[env->current_stage];
+        }
+    }
+
+    return (int16_t)env->current_level;
+}
+
+#endif
+
+
+/////
+
+
+#if 1
+int16_t levels[8] = {
+    0,     // Stage 0: Initial level (silence before keypress)
+    32767, // Stage 1: Attack peak (maximum volume)
+    16384, // Stage 2: Decay to sustain level
+    8192,  // Stage 3: Lower sustain level
+    8192,  // Stage 4: Sustained level while the key is held
+    8192,  // Stage 5: Sustained level (duplicate of stage 4)
+    64,  // Stage 6: Sustained level (optional duplicate)
+    0      // Stage 7: Release to silence
+};
+
+uint32_t rates[8] = {
+    5000,  // Stage 0: Fast attack (sharp rise in volume)
+    5000,  // Stage 1: Moderate attack rate
+    1000,  // Stage 2: Slower decay rate to sustain level
+    0,     // Stage 3: Hold at sustain level (no change in level)
+    0,     // Stage 4: Sustain while key is held (no change in level)
+    0,     // Stage 5: Sustain (duplicate)
+    500,   // Stage 6: Sustain (duplicate)
+    1000   // Stage 7: Fast release rate (fade out)
+};
+#else
+int16_t levels[8] = {0, 16384, 32767, 16384, 8192, 4096, 2048, 0}; // Example envelope levels
+uint32_t rates[8] = {1000, 5000, 3000, 2000, 1500, 1500, 1500, 1000}; // Example rates (progression speed)
+
+// int16_t levels[8] = {0, 16384, 32767, 16384, 8192, 4096, 2048, 0}; // Example envelope levels
+// uint32_t rates[8] = {2050, 110250, 44100, 88200, 132300, 176400, 220500, 44100}; // Example rates (now supporting several-second stages)
+
+
+// int16_t levels[8] = {0, 6000, 9000, 5000, 400, 4096, 2048, 0}; // Example envelope levels
+// uint32_t rates[8] = {5000, 5000, 4410, 8820, 50000, 1000, 500, 1}; // Example rates (now supporting several-second stages)
+#endif
+
+Envelope env;
+
+/////
+
+#endif
+
 
 int wire(char *line) {
     int p = 0;
@@ -650,11 +840,6 @@ int wire(char *line) {
                 running = 0;
                 return -1;
             }
-        } else if (c == '~') {
-            // sleep n ms
-            int ms = mytol(&line[p], &valid, &next);
-            if (!valid) break; else p += next-1;
-            usleep(ms * 1000);
         } else if (c == '?') {
             char peek = line[p];
             if (peek == '?') {
@@ -662,7 +847,7 @@ int wire(char *line) {
                 for (int i=0; i<VOICES; i++) {
                     char flag = ' ';
                     if (i == voice) flag = '*';
-                    show_voice(flag, i);
+                    printf("%c v%d w%d f%g a%g t%d b%d\n", flag, i, ow[i], of[i], oa[i], top[i], bot[i]);
                 }
                 // printf("%u, %u\n", (dds[voice].phase_accumulator>>8)&PHASE_MASK, dds[voice].phase_increment);
                 // printf("sent=%lld\n", sent);
@@ -676,49 +861,15 @@ int wire(char *line) {
                 int i = voice;
                 char flag = ' ';
                 if (i == voice) flag = '*';
-                show_voice(flag, i);
+                printf("%c v%d w%d f%g a%g t%d b%d\n", flag, i, ow[i], of[i], oa[i], top[i], bot[i]);
             }
             continue;
-        } else if (c == 'B') {
-            // breakpoint aka ADR ... poor copy of AMY's
-            // b#,#,#
-            // attack-ms, decay-ms, release-ms
-
-            int a = mytol(&line[p], &valid, &next);
-            printf("attack :: p:%d :: n:%d valid:%d next:%d\n", p, a, valid, next);
-            if (!valid) break; else p += next-1;
-            if (line[p] == ',') p++; else break;
-
-            int d = mytol(&line[p], &valid, &next);
-            printf("decay :: p:%d :: n:%d valid:%d next:%d\n", p, d, valid, next);
-            if (!valid) break; else p += next-1;
-            if (line[p] == ',') p++; else break;
-
-            int r = mytol(&line[p], &valid, &next);
-            printf("release :: p:%d :: n:%d valid:%d next:%d\n", p, r, valid, next);
-            if (!valid) break; else p += next-1;
-
-            // use the values
-            envelope_init(&env[voice],a,d,r, SAMPLE_RATE);
-            joe_env_init(&jenv[voice], a, d); // hack... using d as attack level
-        } else if (c == 'e') {
-            char peek = line[p];
-            if (peek == '0') {
-                p++;
-                oe[voice] = 0;
-            } else if (peek == '1') {
-                p++;
-                oe[voice] = 1;
-            } else {
-                continue;
-            }
         } else if (c == 'f') {
             double f = mytod(&line[p], &valid, &next);
             // printf("freq :: p:%d :: f:%f valid:%d next:%d\n", p, f, valid, next);
             if (!valid) break; else p += next-1;
             if (f >= 0.0) of[voice] = f;
             dds_mod(&dds[voice], f);
-            set_wave_table_frequency(&wtosc[voice], f);
         } else if (c == 'v') {
             int n = mytol(&line[p], &valid, &next);
             // printf("voice :: p:%d :: n:%d valid:%d next:%d\n", p, n, valid, next);
@@ -736,19 +887,7 @@ int wire(char *line) {
             int w = mytol(&line[p], &valid, &next);
             // printf("wave :: p:%d :: n:%d valid:%d next:%d\n", p, w, valid, next);
             if (!valid) break; else p += next-1;
-            if (w >= 0 && w < WAVE_MAX) {
-                ow[voice] = w;
-                int16_t *ptr = none;
-                switch (w) {
-                    case SINE: ptr = sine; break;
-                    case SQR: ptr = sqr; break;
-                    case SAWD: ptr = sawdown; break;
-                    case SAWU: ptr = sawup; break;
-                    case TRI: ptr = tri; break;
-                    case NOIZ: ptr = noise; break;
-                }
-                wtosc[voice].wave_table = ptr;
-            }
+            if (w >= 0 && w < WAVE_MAX) ow[voice] = w;
         } else if (c == 'n') {
             double note = mytod(&line[p], &valid, &next);
             // printf("note :: p:%d :: note:%f valid:%d next:%d\n", p, note, valid, next);
@@ -802,15 +941,14 @@ int wire(char *line) {
                 printf("%d tri\n", TRI);
                 printf("%d noiz\n", NOIZ);
             }
-        } else if (c == 'l') {
-            double velocity = mytod(&line[p], &valid, &next);
-            if (!valid) break; else p += next-1;
-            if (velocity == 0.0) {
-                envelope_note_off(&env[voice]);
-            } else if (velocity > 0.0) {
-                envelope_note_on(&env[voice]);
-                joe_env_trigger(&jenv[voice]);
-            }
+        } else if (c == 'T') {
+            puts("TRIGGER");
+            // trigger_envelope(&env);
+            ADSR_noteOn(&env);
+        } else if (c == 'R') {
+            puts("RELEASE");
+            // release_envelope(&env);
+            ADSR_noteOff(&env);
         }
     }
 }
@@ -842,20 +980,6 @@ int16_t *waves[WAVE_MAX] = {
     usr4,
 };
 
-void altsynth(int16_t *buffer, int period_size) {
-    for (int i=0; i<PERIOD_SIZE; i++) {
-        buffer[i] = 0;
-        for (int v=0; v<VOICES; v++) {
-            int s = next_wave_table_sample(&wtosc[v]);
-            s = s * top[v] / bot[v];
-            int16_t envelope_value = envelope_process(&env[v]);
-            int32_t sample = ((int32_t)s * envelope_value) >> 15;
-            int16_t final_output = (int16_t)(sample);
-            buffer[i] += final_output;
-        }
-    }
-}
-
 void synth(int16_t *buffer, int period_size) {
     int a = 0;
     int b = 0;
@@ -863,34 +987,17 @@ void synth(int16_t *buffer, int period_size) {
         buffer[n] = 0;
         int c = 0;
         for (int i=0; i<VOICES; i+=2) {
-            int mod = i+1;
             if (ow[i] == NONE) continue;
             if (oa[i] == 0.0) continue;
-            if (top[i] == 0) continue;
             c++;
-            a = (dds_step(&dds[i], waves[ow[i]])) * top[i] / bot[i];
-            if (ow[mod] == NONE) {
+            a = (dds_step(&dds[i+0], waves[ow[i+0]])) * top[i+0] / bot[i+0];
+            if (ow[i+1] == NONE) {
                 b = 0;
             } else {
-                b = (dds_step(&dds[mod], waves[ow[mod]])) * top[mod] / bot[mod];
-                if (oe[mod]) {
-                    // int16_t envelope_value = envelope_process(&env[mod]);
-                    s16 envelope_value = joe_env_next(&jenv[voice]);
-                    int32_t sample = ((int32_t)b * envelope_value) >> 15;
-                    int16_t final_output = (int16_t)(sample);
-                    b = final_output;
-                }
+                b = (dds_step(&dds[i+1], waves[ow[i+1]])) * top[i+1] / bot[i+1];
             }
-            dds_mod(&dds[i], of[i] + (double)b);
-            if (oe[i]) {
-                // int16_t envelope_value = envelope_process(&env[i]);
-                s16 envelope_value = joe_env_next(&jenv[voice]);
-                int32_t sample = ((int32_t)a * envelope_value) >> 15;
-                int16_t final_output = (int16_t)(sample);
-                buffer[n] += final_output;
-            } else {
-                buffer[n] += a;
-            }
+            dds_mod(&dds[i+0], of[i+0] + (double)b);
+            buffer[n] += a;
         }
         // buffer[n] /= c;
     }
@@ -952,41 +1059,30 @@ int main(int argc, char *argv[]) {
     generate_noise(noise, CHUNK_SIZE);
     generate_none(none, CHUNK_SIZE);
 
-    for (int i=0; i<VOICES; i++) {
-        init_wave_table_oscillator(&wtosc[i], sine, CHUNK_SIZE, 440.0);
-    }
+    // init_envelope(&env, levels, rates, 2, 6);
+    // init_envelope(&env, levels, rates, 4, 7);  // Sustain on stage 4, release starts at stage 7
+    ADSR_init(&env, 2, 3, MAX_ENVELOPE * 0.7, 4, 44100);
+    WaveTableOscillator wtsine;
+    init_wave_table_oscillator(&wtsine, sine, CHUNK_SIZE, 440.0);
 
     for (int i=0; i<VOICES; i+=2) {
-        int mod = i+1;
-        of[i] = 440.0;
-        of[mod] = 0.25;
-        dds_init(&dds[i], of[i]);
-        dds_init(&dds[mod], of[mod]);
+        of[i+0] = 440.0;
+        of[i+1] = 0.25;
+        dds_init(&dds[i+0], of[i+0]);
+        dds_init(&dds[i+1], of[i+1]);
         if (i < 4) {
-            ow[i] = SINE;
-            ow[mod] = SINE;
-            oa[i] = .01;
-            oa[mod] = 0;
+            ow[i+0] = SINE;
+            ow[i+1] = SINE;
+            oa[i+0] = .01;
+            oa[i+1] = 0;
         } else {
-            ow[i] = NONE;
-            ow[mod] = NONE;
-            oa[i] = 0;
-            oa[mod] = 0;
+            ow[i+0] = NONE;
+            ow[i+1] = NONE;            
+            oa[i+0] = 0;
+            oa[i+1] = 0;
         }
-        calc_ratio(i);
-        calc_ratio(mod);
-    }
-
-
-    for (int i=0; i<VOICES; i+=1) {
-        // simple
-        envelope_init(&env[i], 
-            2000,    // 2 second attack
-            3000,    // 3 second decay
-            4000,    // 4 second release
-            44100    // sample rate
-        );
-        joe_env_init(&jenv[i], 1000, MAX_VALUE);
+        calc_ratio(i+0);
+        calc_ratio(i+1);
     }
 
     pthread_t user_thread;
@@ -1002,10 +1098,16 @@ int main(int argc, char *argv[]) {
     while (running) {
         // Fill the buffer with DDS-generated sine wave samples
 
-        #if 1
+        #if 0
         synth(buffer, PERIOD_SIZE);
         #else
-        altsynth(buffer, PERIOD_SIZE);
+        for (int i=0; i<PERIOD_SIZE; i++) {
+            int s = next_wave_table_sample(&wtsine);
+            // int e = next_envelope_value(&env);
+            int e = ADSR_process(&env);
+            int n = (s * e) / MAX_ENVELOPE;
+            buffer[i] = n;
+        }
         #endif
 
         // Wait until ALSA is ready to accept new data
