@@ -4,13 +4,96 @@
 #include <alsa/asoundlib.h>
 #include <pthread.h>
 
+typedef int32_t qfp;
+
+#if 0
+#define QSTR "Q16.16"
+#define QMUL (65536.0)
+#define QSFT (16)
+#define QMSK (0xffff)
+#endif
+
+#if 1
+#define QSTR "Q17.15"
+#define QMUL (32768.0)
+#define QSFT (15)
+#define QMSK (0x7fff)
+#endif
+
+#if 0
+#define QSTR "Q18.14"
+#define QMUL (16384.0)
+#define QSFT (14)
+#define QMSK (0x3fff)
+#endif
+
+#if 0
+#define QSTR "Q19.13"
+#define QMUL (8192.0)
+#define QSFT (13)
+#define QMSK (0x1fff)
+#endif
+
+#if 0
+#define QSTR "Q20.12"
+#define QMUL (4096.0)
+#define QSFT (12)
+#define QMSK (0xfff)
+#endif
+
+#if 0
+#define QSTR "Q21.11"
+#define QMUL (2048.0)
+#define QSFT (11)
+#define QMSK (0x7ff)
+#endif
+
+#if 0
+#define QSTR "Q22.10"
+#define QMUL (1024.0)
+#define QSFT (10)
+#define QMSK (0x3ff)
+#endif
+
+#if 0
+#define QSTR "Q23.9"
+#define QMUL (512.0)
+#define QSFT (9)
+#define QMSK (0x1ff)
+#endif
+
+#if 0
+#define QSTR "Q24.8"
+#define QMUL (256.0)
+#define QSFT (8)
+#define QMSK (0xff)
+#endif
+
+#if 1
+qfp dtoqfp(double f) {
+ return f * QMUL;
+}
+double qfptod(qfp q) {
+  return (double)q / QMUL;
+}
+int32_t qfpwhole(qfp q) {
+  return q >> QSFT;
+}
+uint32_t qfpfrac(qfp q) {
+  return q & QMSK;
+}
+#endif
+
 #include <sys/time.h>
 
-#define SAMPLE_RATE (44100)
-#define CYCLE_SIZE (4096)
-#define ALSA_BUFFER (1024)  // Number of samples per ALSA period
+#define SAMPLE_RATE 44100
+#define WAVE_SIZE 4096 // must be a power of 2 for the mask below to work
+#define PHASE_MASK (WAVE_SIZE - 1)
+#define PERIOD_SIZE 1024  // Number of samples per ALSA period
 
 #define VOICES (8)
+
+qfp vol[VOICES];
 
 struct timeval rtns0;
 struct timeval rtns1;
@@ -20,70 +103,47 @@ typedef int16_t sample_t;
 // DDS structure
 typedef struct {
     uint32_t phase_accumulator;
-    int32_t phase_increment;
-    uint32_t size;
-    int32_t phase_increment_divisor;
+    uint32_t phase_increment;
 } DDS;
 
+// DDS instance
 DDS dds[VOICES];
-
-// Q17.15
-#define DDS_FRAC_BITS (15)
-#define DDS_SCALE (1 << DDS_FRAC_BITS)
-
-void dds_freq(DDS *dds, double f) {
-    dds->phase_increment = (int32_t)((f * dds->size) / SAMPLE_RATE * DDS_SCALE);
-}
-
-void dds_init(DDS *dds, uint32_t size, double f) {
-    dds->phase_accumulator = 0;
-    dds->size = size;
-    dds->phase_increment_divisor = SAMPLE_RATE * DDS_SCALE;
-    dds_freq(dds, f);
-}
-
-sample_t dds_step(DDS *dds, sample_t *wavetable) {
-    if (dds->size == 0) return 0;
-    uint32_t index = dds->phase_accumulator >> DDS_FRAC_BITS;
-    sample_t sample = wavetable[index % dds->size];
-    dds->phase_accumulator += dds->phase_increment;
-    return sample;
-}
 
 // ALSA variables
 snd_pcm_t *pcm_handle;
 snd_pcm_hw_params_t *hw_params;
 
-sample_t sine[CYCLE_SIZE];
-sample_t cosine[CYCLE_SIZE];
-sample_t sqr[CYCLE_SIZE];
-sample_t tri[CYCLE_SIZE];
-sample_t sawup[CYCLE_SIZE];
-sample_t sawdown[CYCLE_SIZE];
-sample_t noise[CYCLE_SIZE];
-sample_t none[CYCLE_SIZE];
-sample_t usr0[CYCLE_SIZE];
-sample_t usr1[CYCLE_SIZE];
-sample_t usr2[CYCLE_SIZE];
-sample_t usr3[CYCLE_SIZE];
-sample_t usr4[CYCLE_SIZE];
+// Wavetable for sine wave
+int16_t sine[WAVE_SIZE];
+int16_t cosine[WAVE_SIZE];
+int16_t sqr[WAVE_SIZE];
+int16_t tri[WAVE_SIZE];
+int16_t sawup[WAVE_SIZE];
+int16_t sawdown[WAVE_SIZE];
+int16_t noise[WAVE_SIZE];
+int16_t none[WAVE_SIZE];
+int16_t usr0[WAVE_SIZE];
+int16_t usr1[WAVE_SIZE];
+int16_t usr2[WAVE_SIZE];
+int16_t usr3[WAVE_SIZE];
+int16_t usr4[WAVE_SIZE];
 
 #define MAX_VALUE 32767
 #define MIN_VALUE -32767
 
-void make_sine(sample_t *table, int size) {
+void make_sine(int16_t *table, int size) {
     for (int i = 0; i < size; i++) {
-        table[i] = (sample_t)(MAX_VALUE * sinf(2.0f * M_PI * i / size));
+        table[i] = (int16_t)(MAX_VALUE * sinf(2.0f * M_PI * i / size));
     }
 }
 
-void make_cosine(sample_t *table, int size) {
+void make_cosine(int16_t *table, int size) {
     for (int i = 0; i < size; i++) {
-        table[i] = (sample_t)(MAX_VALUE * cosf(2.0f * M_PI * i / size));
+        table[i] = (int16_t)(MAX_VALUE * cosf(2.0f * M_PI * i / size));
     }
 }
 
-void make_sqr(sample_t *table, int size) {
+void make_sqr(int16_t *table, int size) {
     for (int i = 0; i < size; i++) {
         if (i < (size/2)) {
             table[i] = MAX_VALUE;
@@ -93,7 +153,7 @@ void make_sqr(sample_t *table, int size) {
     }
 }
 
-void make_tri(sample_t *table, int size) {
+void make_tri(int16_t *table, int size) {
     int quarter = size / 4;
     for (int i = 0; i < size; i++) {
         if (i < quarter) {
@@ -106,7 +166,7 @@ void make_tri(sample_t *table, int size) {
     }
 }
 
-void make_sawup(sample_t *table, int size) {
+void make_sawup(int16_t *table, int size) {
     int acc = 0;
     int rate = MAX_VALUE/size;
     for (int i = 0; i < size; i++) {
@@ -115,7 +175,7 @@ void make_sawup(sample_t *table, int size) {
     }
 }
 
-void make_sawdown(sample_t *table, int size) {
+void make_sawdown(int16_t *table, int size) {
     int acc = MAX_VALUE;
     int rate = MAX_VALUE/size;
     for (int i = 0; i < size; i++) {
@@ -124,19 +184,39 @@ void make_sawdown(sample_t *table, int size) {
     }
 }
 
-void make_noise(sample_t *table, int size) {
+void make_noise(int16_t *table, int size) {
     for (int i = 0; i < size; i++) {
         table[i] = ((double)rand()/(double)RAND_MAX - 0.5) * MAX_VALUE;
     }
 }
 
-void make_none(sample_t *table, int size) {
+void make_none(int16_t *table, int size) {
     for (int i = 0; i < size; i++) {
         table[i] = 0;
     }
 }
 
+#if 1
+// DDS initialization
+void dds_init(DDS *dds, double output_frequency) {
+    dds->phase_accumulator = 0;
+    dds->phase_increment =
+      (uint32_t)(
+          (output_frequency * WAVE_SIZE) / SAMPLE_RATE * (1 << 8));
+}
 
+void dds_mod(DDS *dds, double new_frequency) {
+    dds->phase_increment = (uint32_t)((new_frequency * WAVE_SIZE) / SAMPLE_RATE * (1 << 8));
+}
+
+// DDS step to get the next sample
+int16_t dds_step(DDS *dds, int16_t *wavetable) {
+    uint16_t index = dds->phase_accumulator >> 8;
+    int16_t sample = wavetable[index & PHASE_MASK];
+    dds->phase_accumulator += dds->phase_increment;
+    return sample;
+}
+#endif
 
 // ALSA error handler
 void check_alsa_error(int err, const char *msg) {
@@ -165,7 +245,7 @@ int setup_alsa(char *device) {
     snd_pcm_hw_params_set_format(pcm_handle, hw_params, SND_PCM_FORMAT_S16_LE);
     snd_pcm_hw_params_set_channels(pcm_handle, hw_params, 1);  // Mono output
     snd_pcm_hw_params_set_rate(pcm_handle, hw_params, SAMPLE_RATE, 0);
-    snd_pcm_hw_params_set_period_size(pcm_handle, hw_params, ALSA_BUFFER, 0);
+    snd_pcm_hw_params_set_period_size(pcm_handle, hw_params, PERIOD_SIZE, 0);
 
     // Apply hardware parameters
     if ((err = snd_pcm_hw_params(pcm_handle, hw_params)) < 0) {
@@ -181,58 +261,31 @@ int setup_alsa(char *device) {
     return 0;
 }
 
-#if 0
-// TODO
-int note[VOICES];
-int gate[VOICES];
-int note_active[VOICES];
-
-double envelope(
-    int *note_active, int gate, double *env_level, double t,
-    double attack, double decay, double sustain, double release) {
-    if (gate)  {
-        if (t > attack + decay) return(*env_level = sustain);
-        if (t > attack) return(*env_level = 1.0 - (1.0 - sustain) * (t - attack) / decay);
-        return *env_level = t / attack;
-    } else {
-        if (t > release) {
-            if (note_active) *note_active = 0;
-            return *env_level = 0;
-        }
-        return *env_level * (1.0 - t / release);
-    }
-}
-
-#define GAIN_TOP 1
-#define GAIN_BOT 2
-
 double params[1024];
 char input[1024];
 
-#endif
-
-
 int running = 1;
 
-#define WAVE_MAX (12)
+//#define WAVE_MAX (12)
 
+int oe[VOICES];
+int ofm[VOICES]; // choose which oscillator is a frequency modulator
+int oam[VOICES]; // choose which oscillator is a amplitude modulator
+
+#if 0
 double of[VOICES];
 double on[VOICES];
 double oa[VOICES];
-int oe[VOICES];
-int ow[VOICES];
 
 // LFO-ey stuff
 // TODO
-int ismod[VOICES];
-int cachemod[VOICES];
-int ofm[VOICES]; // choose which oscillator is a frequency modulator
 int oam[VOICES]; // choose which oscillator is a amplitude modulator
 int opm[VOICES]; // choose which oscillator is a panning modulator
 
 // amplitude ratio... this influences the oa
 int top[VOICES];
 int bot[VOICES];
+#endif
 
 #include "linenoise.h"
 
@@ -247,6 +300,7 @@ int agcd(int a, int b) {
     return a;
 }
 
+#if 0
 void calc_ratio(int index) {
     int precision = 10000;
     int ip = oa[index] * precision;
@@ -254,6 +308,7 @@ void calc_ratio(int index) {
     top[index] = ip / gcd;
     bot[index] = precision / gcd;
 }
+#endif
 
 long mytol(char *str, int *valid, int *next) {
     long val;
@@ -311,20 +366,23 @@ void *midi(void *arg) {
 }
 
 // inspired by AMY :)
-#define SINE 0
-#define SQR  1
-#define SAWD 2
-#define SAWU 3
-#define TRI  4
-#define NOIZ 5
-#define USR0 6
-#define USR1 7
-#define USR2 8
-#define USR3 9
-#define USR4 10
-#define NONE 11
+enum {
+  SINE,
+  SQR,
+  SAWD,
+  SAWU,
+  TRI ,
+  NOIZ,
+  USR0,
+  USR1,
+  USR2,
+  USR3,
+  USR4,
+  NONE,
+  WAVE_MAX,
+};
 
-void dump(sample_t *wave) {
+void dump(int16_t *wave) {
     int c = 0;
     char template[] = "waveXXXXXX";
     int fd = mkstemp(template);
@@ -335,12 +393,114 @@ void dump(sample_t *wave) {
     }
     printf("created %s\n", template);
     char buf[80];
-    for (int i=0; i<CYCLE_SIZE; i++) {
+    for (int i=0; i<WAVE_SIZE; i++) {
         sprintf(buf, "%d\n", wave[i]);
         write(fd, buf, strlen(buf));
     }
     close(fd);
 }
+
+
+
+
+#include <stdint.h>
+#include <stddef.h>
+
+// #define SAMPLE_RATE 44100
+#define FIXED_POINT_SHIFT 16
+
+typedef struct {
+    double freq;
+    double modf;
+    int w;
+    sample_t *wave;
+    sample_t raw;
+    sample_t processed;
+    size_t len;
+    int32_t inc;
+    int32_t acc;
+    int fps;
+    int rate;
+    //
+    int32_t scale;
+    int32_t wrap;
+    char ismod;
+    int fmo;
+    int amo;
+} osc_t;
+
+void osc_wave(osc_t *osc, sample_t *wave, size_t len) {
+    osc->wave = wave;
+    osc->len = len;
+    osc->wrap = len << osc->fps;
+
+    // Calculate the phase increment (fixed-point),
+    // scale for both the frequency and the wave table size
+    osc->inc = (int32_t)((osc->freq * len * osc->scale) / osc->rate);
+}
+
+void osc_init(osc_t *osc, sample_t *wave, size_t len, double freq) {
+  osc->freq = freq;
+  osc->fps = QSFT;
+  osc->scale = 1 << QSFT;
+  osc->rate = SAMPLE_RATE;
+
+  osc_wave(osc, wave, len);
+
+  osc->acc = 0;
+
+  osc->ismod = 0;
+  osc->fmo = -1;
+}
+
+void osc_freq(osc_t *osc, double freq) {
+  osc->freq = freq;
+  osc->inc = (int32_t)((freq * osc->len * osc->scale) / osc->rate);
+}
+
+// Generate the next sample from the wave table
+sample_t osc_sample(osc_t *osc) {
+    // Extract the integer part of the phase accumulator to get the current table index
+    uint32_t index = osc->acc >> osc->fps;
+
+    // Get the next table index, wrapping around if necessary
+    uint32_t next_index = (index + 1) % osc->len;
+
+    // Get the fractional part of the phase accumulator for interpolation
+    uint32_t fractional = osc->acc & (osc->scale - 1);
+
+    // Perform linear interpolation between the current sample and the next sample
+#if 1
+    int16_t current = osc->wave[index % osc->len];
+    // keep value internally for modulator use
+    osc->raw = current;
+    // increment the phase accumulator and wrap if it exceeds the wave size
+    osc->acc += osc->inc;
+    osc->acc %= osc->wrap;
+    return (int16_t)current;
+#else
+    int16_t current = osc->wave[index % osc->len];
+    int16_t next = osc->wave[next_index];
+    int32_t interpolate = current + ((next - current) * fractional) / osc->scale;
+    // keep value internally for modulator use
+    osc->raw = interpolate;
+    // increment the phase accumulator and wrap if it exceeds the wave size
+    osc->acc += osc->inc;
+    osc->acc %= osc->wrap;
+    return (int16_t)interpolate;
+#endif
+}
+
+
+osc_t osc[VOICES];
+
+int ow[VOICES];
+int top[VOICES];
+int bot[VOICES];
+double oa[VOICES];
+double of[VOICES];
+
+///// working but wonky envelope stuff below
 
 // simple ADSR
 
@@ -348,10 +508,9 @@ void dump(sample_t *wave) {
 #include <stdbool.h>
 
 // Fixed point configuration
-// Q17.15
-#define ENV_FRAC_BITS 14
-#define ENV_SCALE (1 << ENV_FRAC_BITS)
-#define ENV_MAX INT32_MAX
+#define FP_BITS 15
+#define FP_SCALE (1 << FP_BITS)
+#define FP_MAX INT32_MAX
 
 enum {
     ENV_IDLE,
@@ -362,45 +521,48 @@ enum {
 };
 
 typedef struct {
+    // Configuration (all in fixed point)
     int32_t attack_rate;   
     int32_t decay_rate;    
     int32_t release_rate;  
     int32_t attack_level;  
     int32_t sustain_level;
+    double dattack_level;  
+    double dsustain_level;
     
-    uint32_t attack_ms;
-    uint32_t decay_ms;
-    uint32_t release_ms;
+    // keep for display
+    int attack_ms;
+    int decay_ms;
+    int release_ms;
 
     int stage;
-    int last_stage;
-
     int32_t current_level;
-
     bool note_on;
 } env_t;
 
-void env_init(env_t* env, 
-    uint32_t attack_ms,
-    uint32_t decay_ms,
-    uint32_t release_ms,
-    uint32_t attack_level,
-    uint32_t sustain_level) {
+void env_init(env_t *env,
+  uint32_t attack_ms, uint32_t decay_ms, uint32_t release_ms,
+  double attack_level, double sustain_level) {
+    
+    if (attack_ms == 0) attack_ms = 1;
+    if (decay_ms == 0) decay_ms = 1;
+    if (release_ms == 0) release_ms = 1;
+    
     env->attack_ms = attack_ms;
     env->decay_ms = decay_ms;
     env->release_ms = release_ms;
 
-    env->attack_level = attack_level;
-    env->sustain_level = sustain_level;
+    env->dattack_level = attack_level;
+    env->dsustain_level = sustain_level;
+
+    // Set target levels in fixed point
+    env->attack_level = FP_SCALE * attack_level;  // 1.0 in fixed point
+    env->sustain_level = (FP_SCALE * sustain_level) / 10;  // 0.7 in fixed point
     
     // Calculate number of samples for each phase
     uint32_t attack_samples = (attack_ms * SAMPLE_RATE) / 1000;
     uint32_t decay_samples = (decay_ms * SAMPLE_RATE) / 1000;
     uint32_t release_samples = (release_ms * SAMPLE_RATE) / 1000;
-
-    if (attack_samples == 0) attack_samples = 1;
-    if (decay_samples == 0) decay_samples = 1;
-    if (release_samples == 0) release_samples = 1;
     
     // Calculate rates ensuring we don't get zero due to fixed point math
     // Rate = target_change_in_level / num_samples
@@ -418,26 +580,22 @@ void env_init(env_t* env,
     env->note_on = false;
 }
 
-void env_on(env_t* env) {
-    env->last_stage = ENV_IDLE;
+void env_on(env_t *env) {
     env->note_on = true;
     env->stage = ENV_ATTACK;
 }
 
-void env_off(env_t* env) {
+void env_off(env_t *env) {
     env->note_on = false;
     env->stage = ENV_RELEASE;
 }
 
-sample_t env_next(env_t* env) {
-    if (env->last_stage != env->stage) {
-        printf("ENV %d -> %d (%d)\n", env->last_stage, env->stage, env->current_level);
-        env->last_stage = env->stage;
-    }
+int16_t env_next(env_t *env) {
     switch (env->stage) {
         case ENV_IDLE:
             env->current_level = 0;
-            break; 
+            break;
+            
         case ENV_ATTACK:
             env->current_level += env->attack_rate;
             if (env->current_level >= env->attack_level) {
@@ -445,6 +603,7 @@ sample_t env_next(env_t* env) {
                 env->stage = ENV_DECAY;
             }
             break;
+            
         case ENV_DECAY:
             env->current_level -= env->decay_rate;
             if (env->current_level <= env->sustain_level) {
@@ -452,11 +611,13 @@ sample_t env_next(env_t* env) {
                 env->stage = ENV_SUSTAIN;
             }
             break;
+            
         case ENV_SUSTAIN:
             if (!env->note_on) {
                 env->stage = ENV_RELEASE;
             }
             break;
+            
         case ENV_RELEASE:
             env->current_level -= env->release_rate;
             if (env->current_level <= 0) {
@@ -465,23 +626,63 @@ sample_t env_next(env_t* env) {
             }
             break;
     }
+    
     // Convert to 16-bit signed integer range
-    return ((env->current_level * ENV_MAX) >> ENV_FRAC_BITS);
+    return (int16_t)((env->current_level * 32767) >> FP_BITS);
 }
+
+
+///
+
+sample_t *waves[WAVE_MAX] = {
+    sine,
+    sqr,
+    sawdown,
+    sawup,
+    tri,
+    noise,
+    none,
+    usr0,
+    usr1,
+    usr2,
+    usr3,
+    usr4,
+};
+
+int wave_size[WAVE_MAX] = {
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+  WAVE_SIZE,
+};
+
+////
 
 env_t env[VOICES];
 
+#define SAMPLE_RATE 44100
 
 void show_voice(char flag, int i) {
-    printf("%c v%d w%d f%.4f e%d a%.4f t%d b%d",
-        flag, i, ow[i], of[i], oe[i], oa[i], top[i], bot[i]);
-    printf(" M%d F%d", ismod[i], ofm[i]);
-    printf(" B%d,%d,%d,%d,%d",
+    double f = osc[i].freq;
+    double v = qfptod(vol[i]);
+    printf("%c v%d w%d f%g a%g", flag, i, osc[i].w, f, v);
+    printf(" M%d F%d", osc[i].ismod, osc[i].fmo);
+    printf(" e%d B%d,%d,%d,%g,%g",
+        oe[i],
         env[i].attack_ms,
         env[i].decay_ms,
         env[i].release_ms,
-        env[i].attack_level,
-        env[i].sustain_level);
+        env[i].dattack_level,
+        env[i].dsustain_level
+        );
     puts("");
 }
 
@@ -504,6 +705,17 @@ int wire(char *line) {
                 running = 0;
                 return -1;
             }
+        } else if (c == '=') {
+            double d = mytod(&line[p], &valid, &next);
+            if (!valid) break; else p += next-1;
+            qfp q = dtoqfp(d);
+            printf("%f -> %d %d:%d -> %f err:%f\n",
+              d,
+              q,
+              qfpwhole(q),
+              qfpfrac(q),
+              qfptod(q),
+              d-qfptod(q));
         } else if (c == '~') {
             // sleep n ms
             int ms = mytol(&line[p], &valid, &next);
@@ -518,11 +730,14 @@ int wire(char *line) {
                     if (i == voice) flag = '*';
                     show_voice(flag, i);
                 }
+                // printf("%u, %u\n", (dds[voice].phase_accumulator>>8)&PHASE_MASK, dds[voice].phase_increment);
+                // printf("sent=%lld\n", sent);
                 printf("rtms %ldms\n", rtms);
                 printf("btms %ldms\n", btms);
                 printf("diff %ldms\n", btms-rtms);
                 printf("L%d\n", latency_hack_ms);
                 printf("D%s\n", device);
+                //
             } else {
                 int i = voice;
                 char flag = ' ';
@@ -533,43 +748,37 @@ int wire(char *line) {
         } else if (c == 'M') {
             int m = mytol(&line[p], &valid, &next);
             if (!valid) break; else p += next-1;
-            ismod[voice] = m;
+            osc[voice].ismod = m;
         } else if (c == 'F') {
             int f = mytol(&line[p], &valid, &next);
             if (!valid) break; else p += next-1;
-            ofm[voice] = f;
+            osc[voice].fmo = f;
         } else if (c == 'B') {
             // breakpoint aka ADR ... poor copy of AMY's
-            // b#,#,#
-            // attack-ms, decay-ms, release-ms
+            // b#,#,#,#,#
+            // attack-ms, decay-ms, release-ms, attack-level, sustain-level
 
             int a = mytol(&line[p], &valid, &next);
-            // printf("attack :: p:%d :: n:%d valid:%d next:%d\n", p, a, valid, next);
             if (!valid) break; else p += next-1;
             if (line[p] == ',') p++; else break;
 
             int d = mytol(&line[p], &valid, &next);
-            // printf("decay :: p:%d :: n:%d valid:%d next:%d\n", p, d, valid, next);
             if (!valid) break; else p += next-1;
             if (line[p] == ',') p++; else break;
 
             int r = mytol(&line[p], &valid, &next);
-            // printf("release :: p:%d :: n:%d valid:%d next:%d\n", p, r, valid, next);
             if (!valid) break; else p += next-1;
             if (line[p] == ',') p++; else break;
 
-            int al = mytol(&line[p], &valid, &next);
-            // printf("attack-level :: p:%d :: n:%d valid:%d next:%d\n", p, al, valid, next);
+            double al = mytod(&line[p], &valid, &next);
             if (!valid) break; else p += next-1;
             if (line[p] == ',') p++; else break;
 
-            int sl = mytol(&line[p], &valid, &next);
-            // printf("sustain-level :: p:%d :: n:%d valid:%d next:%d\n", p, sl, valid, next);
+            double sl = mytod(&line[p], &valid, &next);
             if (!valid) break; else p += next-1;
-
 
             // use the values
-            env_init(&env[voice],a,d,r, al, sl);
+            env_init(&env[voice], a, d, r, al, sl);
         } else if (c == 'e') {
             char peek = line[p];
             if (peek == '0') {
@@ -583,48 +792,51 @@ int wire(char *line) {
             }
         } else if (c == 'f') {
             double f = mytod(&line[p], &valid, &next);
-            // printf("freq :: p:%d :: f:%f valid:%d next:%d\n", p, f, valid, next);
+             printf("freq :: p:%d :: f:%f valid:%d next:%d\n", p, f, valid, next);
             if (!valid) break; else p += next-1;
-            if (f >= 0.0) of[voice] = f;
-            dds_freq(&dds[voice], f);
+            //if (f >= 0.0) of[voice] = f;
+            //dds_mod(&dds[voice], f);
+            osc_freq(&osc[voice], f);
         } else if (c == 'v') {
             int n = mytol(&line[p], &valid, &next);
             // printf("voice :: p:%d :: n:%d valid:%d next:%d\n", p, n, valid, next);
             if (!valid) break; else p += next-1;
             if (n >= 0 && n < VOICES) voice = n;
+        } else if (c == 'I') {
+            int inc = mytol(&line[p], &valid, &next);
+            if (!valid) break; else p += next-1;
+            osc[voice].inc = inc;
         } else if (c == 'a') {
             double a = mytod(&line[p], &valid, &next);
             // printf("amp :: p:%d :: a:%f valid:%d next:%d\n", p, a, valid, next);
             if (!valid) break; else p += next-1;
             if (a >= 0.0) {
-                oa[voice] = a;
-                calc_ratio(voice);
+                //oa[voice] = a;
+                //calc_ratio(voice);
+                vol[voice] = dtoqfp(a);
             }
         } else if (c == 'w') {
             int w = mytol(&line[p], &valid, &next);
-            // printf("wave :: p:%d :: n:%d valid:%d next:%d\n", p, w, valid, next);
             if (!valid) break; else p += next-1;
             if (w >= 0 && w < WAVE_MAX) {
-                ow[voice] = w;
-                sample_t *ptr = none;
-                switch (w) {
-                    case SINE: ptr = sine; break;
-                    case SQR: ptr = sqr; break;
-                    case SAWD: ptr = sawdown; break;
-                    case SAWU: ptr = sawup; break;
-                    case TRI: ptr = tri; break;
-                    case NOIZ: ptr = noise; break;
-                }
+                //ow[voice] = w;
+                sample_t *ptr = waves[w];
+                int len = wave_size[w];
+                osc[voice].w = w;
+                osc_wave(&osc[voice], ptr, len);
             }
         } else if (c == 'n') {
             double note = mytod(&line[p], &valid, &next);
             // printf("note :: p:%d :: note:%f valid:%d next:%d\n", p, note, valid, next);
             if (!valid) break; else p += next-1;
             if (note >= 0.0 && note <= 127.0) {
-                on[voice] = note;
-                of[voice] = 440.0 * pow(2.0, (note - 69.0) / 12.0);
-                dds_freq(&dds[voice], of[voice]);
+                //on[voice] = note;
+                //of[voice] = 440.0 * pow(2.0, (note - 69.0) / 12.0);
+                //dds_mod(&dds[voice], of[voice]);
+                double f = 440.0 * pow(2.0, (note - 69.0) / 12.0);
+                osc_freq(&osc[voice], f);
             }
+#if 0
         } else if (c == 't') {
             int n = mytol(&line[p], &valid, &next);
             // printf("top :: p:%d :: n:%d valid:%d next:%d\n", p, n, valid, next);
@@ -641,6 +853,7 @@ int wire(char *line) {
                 bot[voice] = n;
                 if (bot[voice] > 0) oa[voice] = (double)top[voice]/(double)bot[voice];
             }
+#endif
         } else if (c == 'L') {
             int n = mytol(&line[p], &valid, &next);
             // printf("LAT :: p:%d :: n:%d valid:%d next:%d\n", p, n, valid, next);
@@ -693,58 +906,72 @@ void *user(void *arg) {
     running = 0;
 }
 
-sample_t *waves[WAVE_MAX] = {
-    sine,
-    sqr,
-    sawdown,
-    sawup,
-    tri,
-    noise,
-    none,
-    usr0,
-    usr1,
-    usr2,
-    usr3,
-    usr4,
-};
+void altsynth(sample_t *buffer, int period_size) {
+    for (int i=0; i<PERIOD_SIZE; i++) {
+        buffer[i] = 0;
+        for (int v=0; v<VOICES; v++) {
+            if (vol[v] == 0) continue;
+            int s = osc_sample(&osc[v]);
+            s = s * vol[v] >> QSFT;
+            int n = 0;
+            // envelope?
+            if (oe[v]) {
+              int16_t e = env_next(&env[v]);
+              int32_t sample = ((int32_t)s * e) >> FP_BITS;
+              sample_t f = (sample_t)sample;
+              if (!osc[v].ismod) n = f;
+              osc[v].processed = f;
+            } else {
+              if (!osc[v].ismod) n = s;
+              osc[v].processed = s;
+            }
+            // frequency modulation?
+            int fmo = osc[v].fmo;
+            if (fmo >= 0) {
+              double modf = (double)osc[fmo].processed / (double)MAX_VALUE;
+              if (osc[v].modf != modf) {
+                double f = osc[v].freq + modf;
+                osc[v].inc += (int32_t)((f * osc[v].len * osc[v].scale) / osc->rate);
+                osc[v].modf = modf;
+              }
+            }
+            
+            buffer[i] += n;
+        }
+    }
+}
 
+#if 1
 void synth(int16_t *buffer, int period_size) {
-    int32_t a = 0;
-    int32_t b = 0;
-    for (int n = 0; n < period_size; n++) {
+    int a = 0;
+    int b = 0;
+    for (int n = 0; n < PERIOD_SIZE; n++) {
         buffer[n] = 0;
         int c = 0;
-        // process modulators first
-        for (int i=0; i<VOICES; i++) {
-            cachemod[i] = 0;
-            if (ow[i] == NONE) continue;
-            if (oa[i] == 0.0) continue;
-            if (top[i] == 0) continue;
-            if (ismod[i]) {
-                b = (dds_step(&dds[i], waves[ow[i]])) * top[i] / bot[i];
-                if (oe[i]) {
-                    int32_t envelope_value = env_next(&env[i]);
-                    int32_t sample = (b * envelope_value) >> ENV_FRAC_BITS;
-                    b = sample;
-                }
-                cachemod[i] = b;
-            }
-        }
-        // process things that are not modulators
-        for (int i=0; i<VOICES; i++) {
-            if (ismod[i]) continue;
+        for (int i=0; i<VOICES; i+=2) {
+            int mod = i+1;
             if (ow[i] == NONE) continue;
             if (oa[i] == 0.0) continue;
             if (top[i] == 0) continue;
             c++;
             a = (dds_step(&dds[i], waves[ow[i]])) * top[i] / bot[i];
-            if (ofm[i] >= 0) {
-                dds_freq(&dds[i], of[i] + (double)cachemod[ofm[i]]);
+            if (ow[mod] == NONE) {
+                b = 0;
+            } else {
+                b = (dds_step(&dds[mod], waves[ow[mod]])) * top[mod] / bot[mod];
+                if (oe[mod]) {
+                    int16_t envelope_value = env_next(&env[mod]);
+                    int32_t sample = ((int32_t)b * envelope_value) >> FP_BITS;
+                    int16_t final_output = (int16_t)(sample);
+                    b = final_output;
+                }
             }
+            dds_mod(&dds[i], of[i] + (double)b);
             if (oe[i]) {
-                int32_t envelope_value = env_next(&env[i]);
-                int32_t sample = (a * envelope_value) >> ENV_FRAC_BITS;
-                buffer[n] += sample;
+                int16_t envelope_value = env_next(&env[i]);
+                int32_t sample = ((int32_t)a * envelope_value) >> FP_BITS;
+                int16_t final_output = (int16_t)(sample);
+                buffer[n] += final_output;
             } else {
                 buffer[n] += a;
             }
@@ -752,6 +979,7 @@ void synth(int16_t *buffer, int period_size) {
         // buffer[n] /= c;
     }
 }
+#endif
 
 void listalsa(char *what) {
     int status;
@@ -772,11 +1000,16 @@ void listalsa(char *what) {
     }
 }
 
+
+
+
+///
+
 #define HISTORY_FILE ".synth_history"
 
 int main(int argc, char *argv[]) {
     int err;
-    int16_t buffer[ALSA_BUFFER];
+    int16_t buffer[PERIOD_SIZE];
 
     if (argc > 1) {
         if (argv[1][0] == '-') {
@@ -796,54 +1029,30 @@ int main(int argc, char *argv[]) {
     if (setup_alsa(device) != 0) {
     }
 
+    printf("QFP %s\n", QSTR);
+
     linenoiseHistoryLoad(HISTORY_FILE);
 
-    printf("DDS Q%d.%d\n", 32-DDS_FRAC_BITS, DDS_FRAC_BITS);
-    printf("ENV Q%d.%d\n", 32-ENV_FRAC_BITS, ENV_FRAC_BITS);
-
-    make_sine(sine, CYCLE_SIZE);
-    make_cosine(cosine, CYCLE_SIZE);
-    make_sqr(sqr, CYCLE_SIZE);
-    make_tri(tri, CYCLE_SIZE);
-    make_sawup(sawup, CYCLE_SIZE);
-    make_sawdown(sawdown, CYCLE_SIZE);
-    make_noise(noise, CYCLE_SIZE);
-    make_none(none, CYCLE_SIZE);
+    make_sine(sine, WAVE_SIZE);
+    make_cosine(cosine, WAVE_SIZE);
+    make_sqr(sqr, WAVE_SIZE);
+    make_tri(tri, WAVE_SIZE);
+    make_sawup(sawup, WAVE_SIZE);
+    make_sawdown(sawdown, WAVE_SIZE);
+    make_noise(noise, WAVE_SIZE);
+    make_none(none, WAVE_SIZE);
 
     for (int i=0; i<VOICES; i++) {
-        int mod = i+1;
-        of[i] = 440.0;
-        // of[mod] = 0.25;
-        ofm[i] = -1;
-        ismod[i] = 0;
-        dds_init(&dds[i], CYCLE_SIZE, of[i]);
-        ow[i] = SINE;
-        oa[i] = 0;
-        // dds_init(&dds[mod], CYCLE_SIZE, of[mod]);
-        // if (i < 4) {
-        //     ow[i] = SINE;
-        //     ow[mod] = SINE;
-        //     oa[i] = .01;
-        //     oa[mod] = 0;
-        // } else {
-        //     ow[i] = NONE;
-        //     ow[mod] = NONE;
-        //     oa[i] = 0;
-        //     oa[mod] = 0;
-        // }
-        calc_ratio(i);
-        calc_ratio(mod);
+        osc_init(&osc[i], sine, WAVE_SIZE, 440.0);
+        osc[i].w = SINE;
+        vol[i] = dtoqfp(0);
+        env_init(&env[i], 2000, 1000, 1000, 1.0, 0.7);
     }
 
-
-    for (int i=0; i<VOICES; i+=1) {
-        // simple
-        env_init(&env[i], 
-            2000,    // 2 second attack
-            3000,    // 3 second decay
-            4000,    // 4 second release
-            ENV_SCALE, (ENV_SCALE * 7) / 10);
-    }
+    
+    vol[1] = dtoqfp(0.1);
+    osc_freq(&osc[1], 1);
+    osc[1].ismod = 1;
 
     pthread_t user_thread;
     pthread_create(&user_thread, NULL, user, NULL);
@@ -856,12 +1065,21 @@ int main(int argc, char *argv[]) {
     gettimeofday(&rtns0, NULL);
 
     while (running) {
-        synth(buffer, ALSA_BUFFER);
+        // Fill the buffer with DDS-generated sine wave samples
 
+        #if 1
+        synth(buffer, PERIOD_SIZE);
+        #else
+        altsynth(buffer, PERIOD_SIZE);
+        #endif
+
+        // Wait until ALSA is ready to accept new data
         if ((err = snd_pcm_wait(pcm_handle, 1000)) < 0) {
             check_alsa_error(err, "PCM wait failed");
         }
-        if ((err = snd_pcm_writei(pcm_handle, buffer, ALSA_BUFFER)) < 0) {
+
+        // Write the buffer to ALSA device
+        if ((err = snd_pcm_writei(pcm_handle, buffer, PERIOD_SIZE)) < 0) {
             if (err == -EPIPE) {
                 // Recover from buffer underrun
                 snd_pcm_prepare(pcm_handle);
@@ -872,7 +1090,7 @@ int main(int argc, char *argv[]) {
             // try to not get too far ahead of realtime...
             // without this, we get about 24 seconds ahead of realtime!
             #define TV2MS(t) ((t.tv_sec*1000)+(t.tv_usec/1000))
-            sent+=ALSA_BUFFER;
+            sent+=PERIOD_SIZE;
             gettimeofday(&rtns1, NULL);
             rtms = TV2MS(rtns1)-TV2MS(rtns0);
             btms = sent * 1000 / SAMPLE_RATE;
@@ -891,7 +1109,6 @@ int main(int argc, char *argv[]) {
     pthread_join(midi_thread, NULL);
 
     linenoiseHistorySave(HISTORY_FILE);
-
 
     return 0;
 }
