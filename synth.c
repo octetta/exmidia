@@ -4,6 +4,10 @@
 #include <alsa/asoundlib.h>
 #include <pthread.h>
 
+pid_t audio_pid;
+pid_t user_pid;
+pid_t midi_pid;
+
 #include <sys/time.h>
 
 #define SAMPLE_RATE (44100)
@@ -217,6 +221,9 @@ int running = 1;
 #define WAVE_MAX (12)
 
 double of[VOICES];
+double oft[VOICES];
+int ofg[VOICES];
+double ofgd[VOICES];
 double on[VOICES];
 double oa[VOICES];
 int oe[VOICES];
@@ -305,6 +312,7 @@ char *device = "default";
 int voice = 0;
 
 void *midi(void *arg) {
+    midi_pid = getpid();
     while (running) {
         sleep(5);
     }
@@ -376,16 +384,17 @@ typedef struct {
     int last_stage;
 
     int32_t current_level;
-
+    int32_t last_level;
     bool note_on;
 } env_t;
 
-void env_init(env_t* env, 
+void env_init(env_t* env,
     uint32_t attack_ms,
     uint32_t decay_ms,
     uint32_t release_ms,
     uint32_t attack_level,
     uint32_t sustain_level) {
+    env->last_level = -1;
     env->attack_ms = attack_ms;
     env->decay_ms = decay_ms;
     env->release_ms = release_ms;
@@ -466,30 +475,102 @@ sample_t env_next(env_t* env) {
             break;
     }
     // Convert to 16-bit signed integer range
+    if (env->current_level != env->last_level) {
+        printf("%d\n", env->current_level);
+        env->last_level = env->current_level;
+    }
     return ((env->current_level * ENV_MAX) >> ENV_FRAC_BITS);
 }
 
 env_t env[VOICES];
 
+long long int total_cpu_usage(void) {
+    long long int t;
+    FILE *f = fopen("/proc/stat", "rt");
+    if (f) {
+        char buf[1024];
+        char *line = fgets(buf, sizeof(buf), f);
+        if (line) {
+            long long int user;
+            long long int nice;
+            long long int system;
+            long long int idle;
+            int n = sscanf(line, "%*s %llu %llu %llu %llu", &user, &nice, &system, &idle);
+            // printf("n:%d %llu %llu %llu %llu\n", n, user, nice, system, idle);
+            t = user + nice + system + idle;
+        }
+        fclose(f);
+        return t;
+    }
+    return t;
+}
+
+long int pid_times(pid_t pid) {
+    char file[1024];
+    sprintf(file, "/proc/%d/stat", (int)pid);
+    long long int t;
+    FILE *f = fopen(file, "rt");
+    if (f) {
+        char buf[1024];
+        char *line = fgets(buf, sizeof(buf), f);
+        if (line) {
+            long int usertime;
+            long int systemtime;
+            int n = sscanf(line,
+                "%*s %*s %*s %*s" //pid,command,state,ppid
+                "%*s %*s %*s %*s %*s %*s %*s %*s %*s"
+                "%lu %lu" //usertime,systemtime
+                "%*s %*s %*s %*s %*s %*s %*s"
+                "%*s", //virtual memory size in bytes
+                
+                &usertime, &systemtime);
+            // printf("n:%d %lu %lu\n", n, usertime, systemtime);
+            t = usertime + systemtime;
+        }
+        fclose(f);
+        return t;
+    }
+    return t;
+}
 
 void show_voice(char flag, int i) {
-    printf("%c v%d w%d f%.4f e%d a%.4f t%d b%d",
-        flag, i, ow[i], of[i], oe[i], oa[i], top[i], bot[i]);
-    printf(" M%d F%d", ismod[i], ofm[i]);
-    printf(" B%d,%d,%d,%d,%d",
+    printf("%c v%d w%d f%.4f e%d a%.4f",
+        flag, i, ow[i], of[i], oe[i], oa[i]);
+    // printf(" t%d b%d", top[i], bot[i]);
+    if (ismod[i]) printf(" M%d", ismod[i]);
+    if (ofm[i] >= 0) printf(" F%d", ofm[i]);
+    if (oe[i]) printf(" B%d,%d,%d,%d,%d",
         env[i].attack_ms,
         env[i].decay_ms,
         env[i].release_ms,
         env[i].attack_level,
         env[i].sustain_level);
+    if (ofg[i]) printf(" G%d (%f/%f)", ofg[i], ofgd[i], oft[i]);
     puts("");
+}
+
+void cpu_usage(char *name, pid_t pid) {
+    int ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    // printf("ncpu=%d\n", ncpu);
+    long long t1 = total_cpu_usage();
+    // printf("t1 = %llu\n", t1);
+    long p1 = pid_times(pid);
+    // printf("p1=%ld\n", p1);
+    sleep(1);
+    long long t2 = total_cpu_usage();
+    // printf("t2 = %llu\n", t2);
+    long p2 = pid_times(pid);
+    // printf("p2=%ld\n", p2);
+    double usage = (ncpu * (p2-p1)) * 100 / (double)(t2-t1);
+    printf("%s cpu-usage=%g\n", name, usage);
 }
 
 int wire(char *line) {
     int p = 0;
+    int valid;
     while (line[p] != '\0') {
+        valid = 1;
         char c = line[p++];
-        int valid;
         int next;
         if (c == ' ' || c == '\t' || c == '\r' || c == ';') continue;
         if (c == '#') break;
@@ -534,10 +615,21 @@ int wire(char *line) {
             int m = mytol(&line[p], &valid, &next);
             if (!valid) break; else p += next-1;
             ismod[voice] = m;
+        } else if (c == 'G') {
+            int g = mytol(&line[p], &valid, &next);
+            if (!valid) break; else p += next-1;
+            ofg[voice] = g;
+        } else if (c == 'S') {
+            cpu_usage("audio", audio_pid);
+            cpu_usage("user", user_pid);
+            cpu_usage("midi", midi_pid);
         } else if (c == 'F') {
             int f = mytol(&line[p], &valid, &next);
             if (!valid) break; else p += next-1;
-            ofm[voice] = f;
+            if (f < VOICES) {
+                ofm[voice] = f;
+                ismod[f] = 1;
+            }
         } else if (c == 'B') {
             // breakpoint aka ADR ... poor copy of AMY's
             // b#,#,#
@@ -567,7 +659,6 @@ int wire(char *line) {
             // printf("sustain-level :: p:%d :: n:%d valid:%d next:%d\n", p, sl, valid, next);
             if (!valid) break; else p += next-1;
 
-
             // use the values
             env_init(&env[voice],a,d,r, al, sl);
         } else if (c == 'e') {
@@ -585,8 +676,19 @@ int wire(char *line) {
             double f = mytod(&line[p], &valid, &next);
             // printf("freq :: p:%d :: f:%f valid:%d next:%d\n", p, f, valid, next);
             if (!valid) break; else p += next-1;
-            if (f >= 0.0) of[voice] = f;
-            dds_freq(&dds[voice], f);
+            if (f >= 0.0) {
+                if (ofg[voice] > 0) {
+                    double d = f - of[voice];
+                    ofgd[voice] = d / (double)ofg[voice];
+                    oft[voice] = f;
+                    f += d;
+                    of[voice] = f;
+                    dds_freq(&dds[voice], f);
+                } else {
+                    of[voice] = f;
+                    dds_freq(&dds[voice], f);
+                }
+            }
         } else if (c == 'v') {
             int n = mytol(&line[p], &valid, &next);
             // printf("voice :: p:%d :: n:%d valid:%d next:%d\n", p, n, valid, next);
@@ -672,17 +774,31 @@ int wire(char *line) {
         } else if (c == 'l') {
             double velocity = mytod(&line[p], &valid, &next);
             if (!valid) break; else p += next-1;
-            if (velocity == 0.0) {
-                env_off(&env[voice]);
+            if (velocity <= 0.0) {
+                if (oe[voice]) {
+                    env_off(&env[voice]);
+                } else {
+                    oa[voice] = 0.0;
+                    calc_ratio(voice);
+                }
             } else if (velocity > 0.0) {
+                oa[voice] = velocity;
+                calc_ratio(voice);
                 env_on(&env[voice]);
             }
+        } else {
+            valid = 0;
+            break;
         }
+    }
+    if (!valid) {
+        printf("trouble -> %s\n", &line[p-1]);
     }
 }
 
 void *user(void *arg) {
     // int voice = 0;
+    user_pid = getpid();
     while (1) {
         char *line = linenoise("> ");
         if (line == NULL) break;
@@ -722,6 +838,9 @@ void synth(int16_t *buffer, int period_size) {
             if (top[i] == 0) continue;
             if (ismod[i]) {
                 b = (dds_step(&dds[i], waves[ow[i]])) * top[i] / bot[i];
+                if (ofm[i] >= 0) {
+                    dds_freq(&dds[i], of[i] + (double)cachemod[ofm[i]]);
+                }
                 if (oe[i]) {
                     int32_t envelope_value = env_next(&env[i]);
                     int32_t sample = (b * envelope_value) >> ENV_FRAC_BITS;
@@ -743,7 +862,8 @@ void synth(int16_t *buffer, int period_size) {
             }
             if (oe[i]) {
                 int32_t envelope_value = env_next(&env[i]);
-                int32_t sample = (a * envelope_value) >> ENV_FRAC_BITS;
+                int32_t sample = (a * envelope_value) >> 2;
+                // int64_t sample = (a * envelope_value) >> ENV_FRAC_BITS;
                 buffer[n] += sample;
             } else {
                 buffer[n] += a;
@@ -854,6 +974,8 @@ int main(int argc, char *argv[]) {
     pthread_detach(midi_thread);
 
     gettimeofday(&rtns0, NULL);
+
+    audio_pid = getpid();
 
     while (running) {
         synth(buffer, ALSA_BUFFER);
